@@ -197,8 +197,9 @@ export const getCameraControls = async (req, res) => {
     for (let line of lines) {
       // Parseamos la salida de v4l2-ctl mediante Expresiones Regulares
       // Ejemplo: "brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128"
+      // Soporta int, bool y menu (usado por autofocus y autoexposure en algunos controladores)
       const match = line.match(
-        /^\s*([a-zA-Z0-9_]+).*?\((int|bool)\)\s*:\s*(.*)$/,
+        /^\s*([a-zA-Z0-9_]+).*?\((int|bool|menu)\)\s*:\s*(.*)$/,
       );
 
       if (match) {
@@ -224,6 +225,14 @@ export const getCameraControls = async (req, res) => {
           "hue",
           "sharpness",
           "gamma",
+          "focus_auto",
+          "focus_automatic_continuous",
+          "auto_focus",
+          "focus_absolute",
+          "focus",
+          "zoom_absolute",
+          "zoom",
+          "zoom_auto",
         ];
         if (usefulControls.includes(name)) {
           controls.push(control);
