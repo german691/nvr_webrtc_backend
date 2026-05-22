@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors"; // 1. Importar CORS
 import apiRoutes from "./src/routes.js";
 import { API_PORT } from "./src/config/env.config.js";
+import "./src/config/db.js"; // Inicializar SQLite y sembrar credenciales
 
 const app = express();
 
