@@ -23,6 +23,8 @@ export const MOCK_CAMERAS = [
     modes: [
       { resolution: "1280x720", fps: [30, 15] },
       { resolution: "640x480", fps: [30, 15] }
+    ]
+  },
   {
     dev: "/dev/video3",
     name: "Cámara Quirófano 1",
