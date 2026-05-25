@@ -23,8 +23,14 @@ import {
   changePasswordMiddleware,
   adminMiddleware,
 } from "./middlewares/auth.middleware.js";
+import { DEBUG_MODE } from "./config/env.config.js";
 
 const router = Router();
+
+// Ruta de estado de depuración (pública)
+router.get("/debug-mode", (req, res) => {
+  res.json({ debugMode: DEBUG_MODE });
+});
 
 // Rutas Públicas de Autenticación
 router.post("/auth/login", login);
