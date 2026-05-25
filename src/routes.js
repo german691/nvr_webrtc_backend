@@ -9,18 +9,37 @@ import {
   killAllFfmpegProcesses,
 } from "./domains/camera.controller.js";
 import { validateStreamRequest } from "./middlewares/camera.validation.js";
-import { login } from "./domains/auth.controller.js";
-import { authMiddleware } from "./middlewares/auth.middleware.js";
+import {
+  login,
+  changePassword,
+  getUsers,
+  createUser,
+  updateUser,
+  changeUserPasswordByAdmin,
+  deleteUser,
+} from "./domains/auth.controller.js";
+import {
+  authMiddleware,
+  changePasswordMiddleware,
+  adminMiddleware,
+} from "./middlewares/auth.middleware.js";
 
 const router = Router();
 
 // Rutas Públicas de Autenticación
 router.post("/auth/login", login);
 
-// Rutas Protegidas de Cámaras (Aplican el middleware de autenticación globalmente)
-router.use("/cameras", authMiddleware);
+// Ruta Protegida de Cambio Obligatorio de Contraseña (permite token temporal)
+router.post("/auth/change-password", changePasswordMiddleware, changePassword);
 
-// Endpoints del dominio de Cámaras
+// Rutas CRUD de Usuarios (Protegidas: requiere login y privilegios de Administrador)
+router.get("/users", authMiddleware, adminMiddleware, getUsers);
+router.post("/users", authMiddleware, adminMiddleware, createUser);
+router.put("/users/:id", authMiddleware, adminMiddleware, updateUser);
+router.put("/users/:id/password", authMiddleware, adminMiddleware, changeUserPasswordByAdmin);
+router.delete("/users/:id", authMiddleware, adminMiddleware, deleteUser);
+
+router.use("/cameras", authMiddleware);
 router.get("/cameras", getCameras);
 router.post("/cameras/stream", validateStreamRequest, controlStream);
 
