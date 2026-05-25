@@ -1,35 +1,36 @@
 import { executeRemoteCommand, activeStreams } from "./camera.helper.js";
 import { EDGE_HOST, DEBUG_MODE } from "../config/env.config.js";
+import {
+  MOCK_CAMERAS,
+  DEFAULT_UVC_CONTROLS,
+  USEFUL_UVC_CONTROLS,
+} from "../config/camera.constants.js";
+import { parseFfmpegProcesses } from "../utils/ffmpegParser.js";
 
 // Almacén en memoria persistente para controles UVC ficticios en modo depuración
 export const mockControlsValues = new Map();
 
+/**
+ * Obtiene la configuración de controles simulada de una cámara en modo debug.
+ * @param {string} dev Ruta del dispositivo de video
+ * @returns {Array<object>} Controles de la cámara con sus valores simulados activos
+ */
 const getMockControls = (dev) => {
-  const defaultControls = [
-    { name: "brightness", type: "int", min: 0, max: 255, step: 1, default: 128 },
-    { name: "contrast", type: "int", min: 0, max: 255, step: 1, default: 128 },
-    { name: "saturation", type: "int", min: 0, max: 255, step: 1, default: 128 },
-    { name: "sharpness", type: "int", min: 0, max: 255, step: 1, default: 128 },
-    { name: "gamma", type: "int", min: 90, max: 150, step: 1, default: 100 },
-    { name: "focus_auto", type: "bool", min: 0, max: 1, step: 1, default: 1 },
-    { name: "focus_absolute", type: "int", min: 0, max: 250, step: 5, default: 50 },
-    { name: "zoom_absolute", type: "int", min: 100, max: 500, step: 10, default: 100 }
-  ];
-
-  return defaultControls.map(ctrl => {
+  return DEFAULT_UVC_CONTROLS.map((ctrl) => {
     const key = `${dev}:${ctrl.name}`;
     if (!mockControlsValues.has(key)) {
       mockControlsValues.set(key, ctrl.default);
     }
     return {
       ...ctrl,
-      value: mockControlsValues.get(key)
+      value: mockControlsValues.get(key),
     };
   });
 };
 
-
-// Sincroniza el mapa activeStreams en memoria con los procesos FFmpeg reales en el host remoto
+/**
+ * Sincroniza el mapa activeStreams en memoria con los procesos FFmpeg reales en el host remoto.
+ */
 export const syncActiveStreamsWithHost = async () => {
   if (DEBUG_MODE) return;
   try {
@@ -37,50 +38,17 @@ export const syncActiveStreamsWithHost = async () => {
       "ps aux | grep ffmpeg | grep -v grep || true"
     );
 
+    const activeProcesses = parseFfmpegProcesses(rawOutput);
     const foundDevices = new Set();
 
-    if (rawOutput && rawOutput.trim() !== "") {
-      const lines = rawOutput.split("\n");
-
-      for (let line of lines) {
-        const trimmed = line.trim();
-        if (trimmed === "" || !trimmed.includes("ffmpeg") || trimmed.includes("grep")) {
-          continue;
-        }
-
-        const tokens = trimmed.split(/\s+/);
-        if (tokens.length < 11) {
-          continue;
-        }
-
-        const pid = parseInt(tokens[1], 10);
-        const command = tokens.slice(10).join(" ");
-
-        // Parseo de argumentos con expresiones regulares
-        const deviceMatch = command.match(/-i\s+([^\s]+)/);
-        const device = deviceMatch ? deviceMatch[1] : null;
-
-        if (!device || !device.startsWith("/dev/")) {
-          continue;
-        }
-
-        const resolutionMatch = command.match(/-video_size\s+([^\s]+)/);
-        const resolution = resolutionMatch ? resolutionMatch[1] : "N/A";
-
-        const fpsMatch = command.match(/-framerate\s+([^\s]+)/);
-        const fps = fpsMatch ? fpsMatch[1] : "N/A";
-
-        const bitrateMatch = command.match(/-b:v\s+([^\s]+)/);
-        const bitrate = bitrateMatch ? bitrateMatch[1] : "N/A";
-
-        foundDevices.add(device);
-
-        // Actualizamos o insertamos el stream en memoria
-        activeStreams.set(device, {
-          pid,
-          resolution,
-          fps,
-          bitrate,
+    for (let proc of activeProcesses) {
+      if (proc.device) {
+        foundDevices.add(proc.device);
+        activeStreams.set(proc.device, {
+          pid: proc.pid,
+          resolution: proc.resolution,
+          fps: proc.fps,
+          bitrate: proc.bitrate,
         });
       }
     }
@@ -96,80 +64,14 @@ export const syncActiveStreamsWithHost = async () => {
   }
 };
 
-// GET /api/cameras
+/**
+ * GET /api/cameras
+ * Obtiene el listado de cámaras activas en el sistema, detectando capacidades y estados de stream activos.
+ */
 export const getCameras = async (req, res) => {
   try {
     if (DEBUG_MODE) {
-      const mockCameras = [
-        {
-          dev: "/dev/video0",
-          name: "Cámara Acceso Principal",
-          modes: [
-            { resolution: "1920x1080", fps: [30, 24, 15] },
-            { resolution: "1280x720", fps: [60, 30, 24] },
-            { resolution: "640x480", fps: [30, 15] }
-          ]
-        },
-        {
-          dev: "/dev/video1",
-          name: "Cámara Sala de Espera",
-          modes: [
-            { resolution: "1920x1080", fps: [30, 24] },
-            { resolution: "1280x720", fps: [30, 24, 15] },
-            { resolution: "640x360", fps: [30] }
-          ]
-        },
-        {
-          dev: "/dev/video2",
-          name: "Cámara Pasillo Dental A",
-          modes: [
-            { resolution: "1280x720", fps: [30, 15] },
-            { resolution: "640x480", fps: [30, 15] }
-          ]
-        },
-        {
-          dev: "/dev/video3",
-          name: "Cámara Quirófano 1",
-          modes: [
-            { resolution: "1920x1080", fps: [60, 30, 24] },
-            { resolution: "1280x720", fps: [60, 30] }
-          ]
-        },
-        {
-          dev: "/dev/video4",
-          name: "Cámara Quirófano 2",
-          modes: [
-            { resolution: "1920x1080", fps: [30, 24] },
-            { resolution: "1280x720", fps: [30] }
-          ]
-        },
-        {
-          dev: "/dev/video5",
-          name: "Cámara Box Odontológico A",
-          modes: [
-            { resolution: "1280x720", fps: [30, 15] },
-            { resolution: "640x480", fps: [30] }
-          ]
-        },
-        {
-          dev: "/dev/video6",
-          name: "Cámara Box Odontológico B",
-          modes: [
-            { resolution: "1280x720", fps: [30, 15] },
-            { resolution: "640x480", fps: [30] }
-          ]
-        },
-        {
-          dev: "/dev/video7",
-          name: "Cámara Sector Esterilización",
-          modes: [
-            { resolution: "1920x1080", fps: [30, 24] },
-            { resolution: "1280x720", fps: [30, 15] }
-          ]
-        }
-      ];
-
-      const response = mockCameras.map((cam) => {
+      const response = MOCK_CAMERAS.map((cam) => {
         const streamPath = cam.dev.replace("/dev/", "");
         const activeStream = activeStreams.get(cam.dev);
 
@@ -178,9 +80,7 @@ export const getCameras = async (req, res) => {
           name: cam.name,
           modes: cam.modes,
           streaming: !!activeStream,
-          webrtc_url: activeStream
-            ? `mock://${streamPath}`
-            : null,
+          webrtc_url: activeStream ? `mock://${streamPath}` : null,
           active_settings: activeStream
             ? {
                 resolution: activeStream.resolution,
@@ -198,12 +98,12 @@ export const getCameras = async (req, res) => {
     await syncActiveStreamsWithHost();
 
     const rawJson = await executeRemoteCommand(
-      "/usr/local/bin/get_capabilities.sh",
+      "/usr/local/bin/get_capabilities.sh"
     );
     const cameras = JSON.parse(rawJson);
 
     const validCameras = cameras.filter(
-      (cam) => cam.modes && cam.modes.length > 0,
+      (cam) => cam.modes && cam.modes.length > 0
     );
 
     const response = validCameras.map((cam) => {
@@ -236,7 +136,10 @@ export const getCameras = async (req, res) => {
   }
 };
 
-// POST /api/cameras/stream
+/**
+ * POST /api/cameras/stream
+ * Controla e inicia/detiene el hardware de captura y transcodificación FFmpeg en el host remoto.
+ */
 export const controlStream = async (req, res) => {
   const { dev, resolution, fps, cleanBitrate, action } = req.body;
 
@@ -341,7 +244,10 @@ export const controlStream = async (req, res) => {
   }
 };
 
-// GET /api/cameras/controls?dev=/dev/video0
+/**
+ * GET /api/cameras/controls?dev=/dev/video0
+ * Lista los controles de hardware UVC configurables para un dispositivo de video en particular.
+ */
 export const getCameraControls = async (req, res) => {
   const { dev } = req.query;
 
@@ -357,7 +263,7 @@ export const getCameraControls = async (req, res) => {
   try {
     // Consultamos los controles nativos directamente al hardware
     const rawOutput = await executeRemoteCommand(
-      `v4l2-ctl -d ${dev} --list-ctrls`,
+      `v4l2-ctl -d ${dev} --list-ctrls`
     );
 
     const controls = [];
@@ -366,9 +272,8 @@ export const getCameraControls = async (req, res) => {
     for (let line of lines) {
       // Parseamos la salida de v4l2-ctl mediante Expresiones Regulares
       // Ejemplo: "brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128"
-      // Soporta int, bool y menu (usado por autofocus y autoexposure en algunos controladores)
       const match = line.match(
-        /^\s*([a-zA-Z0-9_]+).*?\((int|bool|menu)\)\s*:\s*(.*)$/,
+        /^\s*([a-zA-Z0-9_]+).*?\((int|bool|menu)\)\s*:\s*(.*)$/
       );
 
       if (match) {
@@ -387,23 +292,7 @@ export const getCameraControls = async (req, res) => {
         });
 
         // Filtramos solo los controles útiles para la interfaz gráfica
-        const usefulControls = [
-          "brightness",
-          "contrast",
-          "saturation",
-          "hue",
-          "sharpness",
-          "gamma",
-          "focus_auto",
-          "focus_automatic_continuous",
-          "auto_focus",
-          "focus_absolute",
-          "focus",
-          "zoom_absolute",
-          "zoom",
-          "zoom_auto",
-        ];
-        if (usefulControls.includes(name)) {
+        if (USEFUL_UVC_CONTROLS.includes(name)) {
           controls.push(control);
         }
       }
@@ -418,7 +307,10 @@ export const getCameraControls = async (req, res) => {
   }
 };
 
-// POST /api/cameras/controls
+/**
+ * POST /api/cameras/controls
+ * Ajusta y aplica el valor de un control UVC nativo al hardware físico.
+ */
 export const setCameraControl = async (req, res) => {
   const { dev, controlName, value } = req.body;
 
@@ -453,7 +345,10 @@ export const setCameraControl = async (req, res) => {
   }
 };
 
-// GET /api/cameras/debug/ffmpeg
+/**
+ * GET /api/cameras/debug/ffmpeg
+ * Devuelve información de depuración de rendimiento y diagnóstico en tiempo real de los procesos FFmpeg activos.
+ */
 export const getFfmpegDebug = async (req, res) => {
   if (DEBUG_MODE) {
     const streams = [];
@@ -493,70 +388,7 @@ export const getFfmpegDebug = async (req, res) => {
       "ps aux | grep ffmpeg | grep -v grep || true"
     );
 
-    const streams = [];
-
-    if (rawOutput && rawOutput.trim() !== "") {
-      const lines = rawOutput.split("\n");
-
-      for (let line of lines) {
-        const trimmed = line.trim();
-        if (trimmed === "" || !trimmed.includes("ffmpeg") || trimmed.includes("grep")) {
-          continue;
-        }
-
-        const tokens = trimmed.split(/\s+/);
-        if (tokens.length < 11) {
-          continue;
-        }
-
-        const user = tokens[0];
-        const pid = tokens[1];
-        const cpu = tokens[2];
-        const mem = tokens[3];
-        const vsz = tokens[4];
-        const rss = tokens[5];
-        const start = tokens[8];
-        const time = tokens[9];
-        const command = tokens.slice(10).join(" ");
-
-        // Parseo de argumentos con expresiones regulares
-        const deviceMatch = command.match(/-i\s+([^\s]+)/);
-        const device = deviceMatch ? deviceMatch[1] : "Desconocido";
-
-        const resolutionMatch = command.match(/-video_size\s+([^\s]+)/);
-        const resolution = resolutionMatch ? resolutionMatch[1] : "N/A";
-
-        const fpsMatch = command.match(/-framerate\s+([^\s]+)/);
-        const fps = fpsMatch ? fpsMatch[1] : "N/A";
-
-        const bitrateMatch = command.match(/-b:v\s+([^\s]+)/);
-        const bitrate = bitrateMatch ? bitrateMatch[1] : "N/A";
-
-        const vaapiMatch = command.match(/-vaapi_device\s+([^\s]+)/);
-        const vaapi = vaapiMatch ? vaapiMatch[1] : "N/A";
-
-        const rtspMatch = command.match(/(rtsp:\/\/[^\s]+)/);
-        const rtspUrl = rtspMatch ? rtspMatch[1] : "N/A";
-
-        streams.push({
-          user,
-          pid,
-          cpu: parseFloat(cpu) || 0,
-          mem: parseFloat(mem) || 0,
-          vsz: parseInt(vsz, 10) || 0,
-          rss: parseInt(rss, 10) || 0,
-          start,
-          time,
-          device,
-          resolution,
-          fps,
-          bitrate,
-          vaapi,
-          rtspUrl,
-          command,
-        });
-      }
-    }
+    const streams = parseFfmpegProcesses(rawOutput);
 
     res.json({
       status: "success",
@@ -570,13 +402,18 @@ export const getFfmpegDebug = async (req, res) => {
   }
 };
 
-// POST /api/cameras/debug/ffmpeg/kill
+/**
+ * POST /api/cameras/debug/ffmpeg/kill
+ * Termina de manera forzosa un proceso FFmpeg particular por su PID.
+ */
 export const killFfmpegProcess = async (req, res) => {
   const { pid } = req.body;
   const pidNum = parseInt(pid, 10);
 
   if (isNaN(pidNum) || pidNum <= 0) {
-    return res.status(400).json({ error: "El PID provisto es inválido o no existe." });
+    return res
+      .status(400)
+      .json({ error: "El PID provisto es inválido o no existe." });
   }
 
   if (DEBUG_MODE) {
@@ -614,13 +451,17 @@ export const killFfmpegProcess = async (req, res) => {
   }
 };
 
-// POST /api/cameras/debug/ffmpeg/kill-all
+/**
+ * POST /api/cameras/debug/ffmpeg/kill-all
+ * Detiene y limpia de manera masiva todas las transmisiones activas y procesos FFmpeg remotos.
+ */
 export const killAllFfmpegProcesses = async (req, res) => {
   if (DEBUG_MODE) {
     activeStreams.clear();
     return res.json({
       status: "success",
-      message: "[MOCK] Todas las transmisiones activas han sido detenidas de manera masiva.",
+      message:
+        "[MOCK] Todas las transmisiones activas han sido detenidas de manera masiva.",
     });
   }
 
@@ -633,7 +474,8 @@ export const killAllFfmpegProcesses = async (req, res) => {
 
     res.json({
       status: "success",
-      message: "Todas las transmisiones activas han sido detenidas de manera masiva.",
+      message:
+        "Todas las transmisiones activas han sido detenidas de manera masiva.",
     });
   } catch (error) {
     res.status(500).json({
@@ -642,5 +484,3 @@ export const killAllFfmpegProcesses = async (req, res) => {
     });
   }
 };
-
-
