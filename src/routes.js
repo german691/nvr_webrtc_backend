@@ -8,6 +8,11 @@ import {
   killFfmpegProcess,
   killAllFfmpegProcesses,
 } from "./domains/camera.controller.js";
+import {
+  getLayouts,
+  createLayout,
+  deleteLayout,
+} from "./domains/layout.controller.js";
 import { validateStreamRequest } from "./middlewares/camera.validation.js";
 import {
   login,
@@ -54,5 +59,9 @@ router.post("/cameras/controls", setCameraControl);
 router.get("/cameras/debug/ffmpeg", getFfmpegDebug);
 router.post("/cameras/debug/ffmpeg/kill", killFfmpegProcess);
 router.post("/cameras/debug/ffmpeg/kill-all", killAllFfmpegProcesses);
+
+router.get("/cameras/layouts", getLayouts);
+router.post("/cameras/layouts", createLayout);
+router.delete("/cameras/layouts/:id", deleteLayout);
 
 export default router;

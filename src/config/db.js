@@ -2,6 +2,7 @@ import sqlite3 from "sqlite3";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { initialPresets } from "./presets.seed.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = join(__dirname, "../../../nvr.db");
@@ -47,6 +48,26 @@ function initializeDb() {
         }
       }
     );
+
+    db.run(
+      `CREATE TABLE IF NOT EXISTS layouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        camera_count INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        cols INTEGER NOT NULL,
+        rows INTEGER NOT NULL,
+        default_ratios TEXT,
+        cells TEXT NOT NULL,
+        is_custom INTEGER DEFAULT 1
+      )`,
+      (err) => {
+        if (err) {
+          console.error("Error al crear la tabla de layouts:", err);
+        } else {
+          checkAndSeedLayouts();
+        }
+      }
+    );
   });
 }
 
@@ -85,6 +106,51 @@ function seedUser() {
           }
         }
       );
+    });
+  });
+}
+
+function checkAndSeedLayouts() {
+  db.get("SELECT COUNT(*) as count FROM layouts", [], (err, row) => {
+    if (err) {
+      console.error("Error al contar layouts en SQLite:", err);
+    } else if (!row || row.count === 0) {
+      seedLayouts();
+    } else {
+      console.log("Base de datos ya cuenta con layouts registrados. Omitiendo siembra.");
+    }
+  });
+}
+
+function seedLayouts() {
+  db.serialize(() => {
+    db.run("DELETE FROM layouts", [], (err) => {
+      if (err) {
+        console.error("Error al limpiar la tabla de layouts:", err);
+        return;
+      }
+
+      const stmt = db.prepare(
+        "INSERT INTO layouts (camera_count, label, cols, rows, default_ratios, cells, is_custom) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      );
+      for (const preset of initialPresets) {
+        stmt.run([
+          preset.camera_count,
+          preset.label,
+          preset.cols,
+          preset.rows,
+          preset.default_ratios,
+          preset.cells,
+          preset.is_custom,
+        ]);
+      }
+      stmt.finalize((errFinal) => {
+        if (errFinal) {
+          console.error("Error al finalizar la siembra de layouts:", errFinal);
+        } else {
+          console.log("Layouts de fábrica sembrados con éxito en SQLite.");
+        }
+      });
     });
   });
 }
