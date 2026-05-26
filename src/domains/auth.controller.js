@@ -1,8 +1,13 @@
 import jwt from "jsonwebtoken";
-import db, { hashPassword } from "../config/db.js";
+import { hashPassword } from "../config/db.js";
 import { JWT_SECRET } from "../config/env.config.js";
+import { UserRepository } from "./user.repository.js";
 
-export const login = (req, res) => {
+/**
+ * POST /api/auth/login
+ * Maneja el inicio de sesión y devuelve un token JWT.
+ */
+export const login = async (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -12,53 +17,53 @@ export const login = (req, res) => {
     });
   }
 
-  db.get(
-    "SELECT * FROM users WHERE username = ?",
-    [username],
-    (err, user) => {
-      if (err) {
-        console.error("Error al buscar usuario en SQLite:", err);
-        return res.status(500).json({
-          status: "error",
-          message: "Error interno del servidor.",
-        });
-      }
+  try {
+    const user = await UserRepository.findByUsername(username);
 
-      if (!user) {
-        return res.status(401).json({
-          status: "error",
-          message: "Usuario o contraseña incorrectos.",
-        });
-      }
-
-      const hashed = hashPassword(password);
-      if (user.password !== hashed) {
-        return res.status(401).json({
-          status: "error",
-          message: "Usuario o contraseña incorrectos.",
-        });
-      }
-
-      const needsPasswordChange = user.password_changed === 0;
-
-      const token = jwt.sign(
-        { id: user.id, username: user.username, role: user.role, needsPasswordChange },
-        JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-
-      return res.json({
-        status: "success",
-        token,
-        username: user.username,
-        role: user.role,
-        needsPasswordChange,
+    if (!user) {
+      return res.status(401).json({
+        status: "error",
+        message: "Usuario o contraseña incorrectos.",
       });
     }
-  );
+
+    const hashed = hashPassword(password);
+    if (user.password !== hashed) {
+      return res.status(401).json({
+        status: "error",
+        message: "Usuario o contraseña incorrectos.",
+      });
+    }
+
+    const needsPasswordChange = user.password_changed === 0;
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role, needsPasswordChange },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
+    return res.json({
+      status: "success",
+      token,
+      username: user.username,
+      role: user.role,
+      needsPasswordChange,
+    });
+  } catch (err) {
+    console.error("Error al buscar usuario en SQLite (login):", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno del servidor.",
+    });
+  }
 };
 
-export const changePassword = (req, res) => {
+/**
+ * POST /api/auth/change-password
+ * Permite cambiar la contraseña obligatoria en el primer inicio de sesión.
+ */
+export const changePassword = async (req, res) => {
   const { newPassword } = req.body;
   const userId = req.user.id;
 
@@ -69,52 +74,62 @@ export const changePassword = (req, res) => {
     });
   }
 
-  const hashedPassword = hashPassword(newPassword);
+  try {
+    const hashedPassword = hashPassword(newPassword);
+    const rowsAffected = await UserRepository.updatePassword(userId, hashedPassword, 1);
 
-  db.run(
-    "UPDATE users SET password = ?, password_changed = 1 WHERE id = ?",
-    [hashedPassword, userId],
-    function (err) {
-      if (err) {
-        console.error("Error al actualizar la contraseña en SQLite:", err);
-        return res.status(500).json({
-          status: "error",
-          message: "Error interno al cambiar la contraseña.",
-        });
-      }
-
-      const token = jwt.sign(
-        { id: userId, username: req.user.username, role: req.user.role, needsPasswordChange: false },
-        JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-
-      return res.json({
-        status: "success",
-        message: "Contraseña actualizada exitosamente.",
-        token,
-      });
-    }
-  );
-};
-
-export const getUsers = (req, res) => {
-  db.all("SELECT id, username, role, password_changed FROM users", [], (err, rows) => {
-    if (err) {
-      console.error("Error al obtener usuarios en SQLite:", err);
-      return res.status(500).json({
+    if (rowsAffected === 0) {
+      return res.status(404).json({
         status: "error",
-        message: "Error interno del servidor al obtener la lista de usuarios.",
+        message: "Usuario no encontrado.",
       });
     }
+
+    const token = jwt.sign(
+      { id: userId, username: req.user.username, role: req.user.role, needsPasswordChange: false },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
+
     return res.json({
       status: "success",
-      users: rows,
+      message: "Contraseña actualizada exitosamente.",
+      token,
     });
-  });
+  } catch (err) {
+    console.error("Error al cambiar contraseña obligatoria:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno al cambiar la contraseña.",
+    });
+  }
 };
 
-export const createUser = (req, res) => {
+/**
+ * GET /api/users
+ * Devuelve la lista completa de usuarios registrados.
+ */
+export const getUsers = async (req, res) => {
+  try {
+    const users = await UserRepository.getAll();
+    return res.json({
+      status: "success",
+      users,
+    });
+  } catch (err) {
+    console.error("Error al obtener lista de usuarios:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno del servidor al obtener la lista de usuarios.",
+    });
+  }
+};
+
+/**
+ * POST /api/users
+ * Registra un nuevo usuario en la base de datos (Exclusivo Administrador).
+ */
+export const createUser = async (req, res) => {
   const { username, password, role } = req.body;
 
   if (!username || !password || !role) {
@@ -138,41 +153,35 @@ export const createUser = (req, res) => {
     });
   }
 
-  const hashedPassword = hashPassword(password);
+  try {
+    const hashedPassword = hashPassword(password);
+    const newUser = await UserRepository.create(username, hashedPassword, role);
 
-  db.run(
-    "INSERT INTO users (username, password, role, password_changed) VALUES (?, ?, ?, 0)",
-    [username.trim(), hashedPassword, role],
-    function (err) {
-      if (err) {
-        if (err.message.includes("UNIQUE")) {
-          return res.status(400).json({
-            status: "error",
-            message: "El nombre de usuario ingresado ya se encuentra registrado.",
-          });
-        }
-        console.error("Error al registrar usuario en SQLite:", err);
-        return res.status(500).json({
-          status: "error",
-          message: "Error interno del servidor al intentar crear el usuario.",
-        });
-      }
-
-      return res.json({
-        status: "success",
-        message: "Usuario creado exitosamente.",
-        user: {
-          id: this.lastID,
-          username: username.trim(),
-          role,
-          password_changed: 0,
-        },
+    return res.json({
+      status: "success",
+      message: "Usuario creado exitosamente.",
+      user: newUser,
+    });
+  } catch (err) {
+    if (err.message && err.message.includes("UNIQUE")) {
+      return res.status(400).json({
+        status: "error",
+        message: "El nombre de usuario ingresado ya se encuentra registrado.",
       });
     }
-  );
+    console.error("Error al registrar usuario en SQLite:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno del servidor al intentar crear el usuario.",
+    });
+  }
 };
 
-export const updateUser = (req, res) => {
+/**
+ * PUT /api/users/:id
+ * Actualiza los datos generales de un usuario (Exclusivo Administrador).
+ */
+export const updateUser = async (req, res) => {
   const { id } = req.params;
   const { username, role } = req.body;
 
@@ -190,7 +199,7 @@ export const updateUser = (req, res) => {
     });
   }
 
-  // Protección: Evitar que el administrador actual se revoque sus propios permisos
+  // Protección: Evitar que el administrador actual se revoque sus propios privilegios
   if (parseInt(id, 10) === req.user.id && role !== "admin") {
     return res.status(400).json({
       status: "error",
@@ -198,40 +207,40 @@ export const updateUser = (req, res) => {
     });
   }
 
-  db.run(
-    "UPDATE users SET username = ?, role = ? WHERE id = ?",
-    [username.trim(), role, id],
-    function (err) {
-      if (err) {
-        if (err.message.includes("UNIQUE")) {
-          return res.status(400).json({
-            status: "error",
-            message: "El nombre de usuario ya se encuentra en uso por otra cuenta.",
-          });
-        }
-        console.error("Error al actualizar usuario en SQLite:", err);
-        return res.status(500).json({
-          status: "error",
-          message: "Error interno al intentar actualizar el usuario.",
-        });
-      }
+  try {
+    const rowsAffected = await UserRepository.update(id, username, role);
 
-      if (this.changes === 0) {
-        return res.status(404).json({
-          status: "error",
-          message: "Usuario no encontrado.",
-        });
-      }
-
-      return res.json({
-        status: "success",
-        message: "Usuario actualizado correctamente.",
+    if (rowsAffected === 0) {
+      return res.status(404).json({
+        status: "error",
+        message: "Usuario no encontrado.",
       });
     }
-  );
+
+    return res.json({
+      status: "success",
+      message: "Usuario actualizado correctamente.",
+    });
+  } catch (err) {
+    if (err.message && err.message.includes("UNIQUE")) {
+      return res.status(400).json({
+        status: "error",
+        message: "El nombre de usuario ya se encuentra en uso por otra cuenta.",
+      });
+    }
+    console.error("Error al actualizar usuario en SQLite:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno al intentar actualizar el usuario.",
+    });
+  }
 };
 
-export const changeUserPasswordByAdmin = (req, res) => {
+/**
+ * PUT /api/users/:id/password
+ * Restablece la contraseña de un usuario por parte de un Administrador.
+ */
+export const changeUserPasswordByAdmin = async (req, res) => {
   const { id } = req.params;
   const { password } = req.body;
 
@@ -242,43 +251,43 @@ export const changeUserPasswordByAdmin = (req, res) => {
     });
   }
 
-  const hashedPassword = hashPassword(password);
-  
-  // Si un administrador cambia su propia clave, se marca de inmediato como cambiada (password_changed = 1).
-  // Si cambia la clave de otro usuario, se marca como pendiente (password_changed = 0) para forzar el cambio en su primer inicio.
-  const isSelf = parseInt(id, 10) === req.user.id;
-  const passwordChangedVal = isSelf ? 1 : 0;
+  try {
+    const hashedPassword = hashPassword(password);
+    
+    // Si un administrador cambia su propia clave, se marca de inmediato como cambiada (password_changed = 1).
+    // Si cambia la clave de otro usuario, se marca como pendiente (password_changed = 0) para forzar el cambio en su primer inicio.
+    const isSelf = parseInt(id, 10) === req.user.id;
+    const passwordChangedVal = isSelf ? 1 : 0;
 
-  db.run(
-    "UPDATE users SET password = ?, password_changed = ? WHERE id = ?",
-    [hashedPassword, passwordChangedVal, id],
-    function (err) {
-      if (err) {
-        console.error("Error al actualizar clave de usuario en SQLite:", err);
-        return res.status(500).json({
-          status: "error",
-          message: "Error interno al restablecer la contraseña.",
-        });
-      }
+    const rowsAffected = await UserRepository.updatePassword(id, hashedPassword, passwordChangedVal);
 
-      if (this.changes === 0) {
-        return res.status(404).json({
-          status: "error",
-          message: "Usuario no encontrado.",
-        });
-      }
-
-      return res.json({
-        status: "success",
-        message: isSelf
-          ? "Contraseña actualizada exitosamente."
-          : "Contraseña restablecida exitosamente. Se exigirá el cambio al usuario en su próximo inicio de sesión.",
+    if (rowsAffected === 0) {
+      return res.status(404).json({
+        status: "error",
+        message: "Usuario no encontrado.",
       });
     }
-  );
+
+    return res.json({
+      status: "success",
+      message: isSelf
+        ? "Contraseña actualizada exitosamente."
+        : "Contraseña restablecida exitosamente. Se exigirá el cambio al usuario en su próximo inicio de sesión.",
+    });
+  } catch (err) {
+    console.error("Error al restablecer clave de usuario en SQLite:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno al restablecer la contraseña.",
+    });
+  }
 };
 
-export const deleteUser = (req, res) => {
+/**
+ * DELETE /api/users/:id
+ * Elimina un usuario por completo de la base de datos (Exclusivo Administrador).
+ */
+export const deleteUser = async (req, res) => {
   const { id } = req.params;
 
   // Protección: Evitar la auto-eliminación
@@ -289,29 +298,25 @@ export const deleteUser = (req, res) => {
     });
   }
 
-  db.run(
-    "DELETE FROM users WHERE id = ?",
-    [id],
-    function (err) {
-      if (err) {
-        console.error("Error al eliminar usuario en SQLite:", err);
-        return res.status(500).json({
-          status: "error",
-          message: "Error interno al eliminar el usuario.",
-        });
-      }
+  try {
+    const rowsAffected = await UserRepository.delete(id);
 
-      if (this.changes === 0) {
-        return res.status(404).json({
-          status: "error",
-          message: "Usuario no encontrado.",
-        });
-      }
-
-      return res.json({
-        status: "success",
-        message: "Usuario eliminado exitosamente.",
+    if (rowsAffected === 0) {
+      return res.status(404).json({
+        status: "error",
+        message: "Usuario no encontrado.",
       });
     }
-  );
+
+    return res.json({
+      status: "success",
+      message: "Usuario eliminado exitosamente.",
+    });
+  } catch (err) {
+    console.error("Error al eliminar usuario en SQLite:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Error interno al eliminar el usuario.",
+    });
+  }
 };
