@@ -17,7 +17,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
 function insertLayouts() {
   db.serialize(() => {
     const stmt = db.prepare(
-      "INSERT INTO layouts (camera_count, label, cols, rows, default_ratios, cells, is_custom) VALUES (?, ?, ?, ?, ?, ?, 1)"
+      "INSERT INTO layouts (camera_count, label, cols, rows, default_ratios, cells, is_custom) VALUES (?, ?, ?, ?, ?, ?, 1)",
     );
 
     for (let i = 1; i <= 20; i++) {
@@ -25,7 +25,7 @@ function insertLayouts() {
       const cols = Math.floor(Math.random() * 4) + 2;
       const rows = Math.floor(Math.random() * 4) + 2;
       const label = `Rejilla de prueba ${i} (${cols}x${rows})`;
-      
+
       const cells = [];
       for (let cIdx = 0; cIdx < camera_count; cIdx++) {
         const gridColumn = String((cIdx % cols) + 1);
@@ -33,7 +33,7 @@ function insertLayouts() {
         cells.push({
           gridColumn,
           gridRow,
-          isPrimary: cIdx === 0
+          isPrimary: cIdx === 0,
         });
       }
 
@@ -43,7 +43,7 @@ function insertLayouts() {
         cols,
         rows,
         JSON.stringify({}),
-        JSON.stringify(cells)
+        JSON.stringify(cells),
       ]);
     }
 

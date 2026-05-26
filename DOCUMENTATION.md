@@ -4,13 +4,16 @@
 
 ### Backend (`/nvr_webrtc_backend/.env`)
 ```env
-PORT=3000
+PORT=3000 # O API_PORT=3000
 JWT_SECRET=4345ee152ce84f7292bf45cd58a6f99e211e67c9e9c4a02c79b6b0175dbe5765
+DEBUG_MODE=false # (opcional, true para modo depuración)
+NVR_USERNAME=tecnologia # (opcional, usuario admin inicial al crear DB)
+NVR_PASSWORD=Tecn02026+ # (opcional, contraseña admin inicial al crear DB)
 ```
 
 ### Frontend (`/nvr_webrtc_frontend/.env`)
 ```env
-VITE_API_URL=http://localhost:3000
+VITE_API_URL=http://localhost:3000/api
 ```
 
 ---

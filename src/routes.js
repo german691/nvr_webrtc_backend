@@ -24,6 +24,12 @@ import {
   deleteUser,
 } from "./domains/auth.controller.js";
 import {
+  getNodes,
+  createNode,
+  updateNode,
+  deleteNode,
+} from "./domains/node.controller.js";
+import {
   authMiddleware,
   changePasswordMiddleware,
   adminMiddleware,
@@ -47,8 +53,19 @@ router.post("/auth/change-password", changePasswordMiddleware, changePassword);
 router.get("/users", authMiddleware, adminMiddleware, getUsers);
 router.post("/users", authMiddleware, adminMiddleware, createUser);
 router.put("/users/:id", authMiddleware, adminMiddleware, updateUser);
-router.put("/users/:id/password", authMiddleware, adminMiddleware, changeUserPasswordByAdmin);
+router.put(
+  "/users/:id/password",
+  authMiddleware,
+  adminMiddleware,
+  changeUserPasswordByAdmin,
+);
 router.delete("/users/:id", authMiddleware, adminMiddleware, deleteUser);
+
+// Rutas CRUD de Nodos Edge (Protegidas: requiere administrador)
+router.get("/nodes", authMiddleware, adminMiddleware, getNodes);
+router.post("/nodes", authMiddleware, adminMiddleware, createNode);
+router.put("/nodes/:id", authMiddleware, adminMiddleware, updateNode);
+router.delete("/nodes/:id", authMiddleware, adminMiddleware, deleteNode);
 
 router.use("/cameras", authMiddleware);
 router.get("/cameras", getCameras);

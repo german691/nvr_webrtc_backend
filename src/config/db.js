@@ -3,6 +3,7 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { initialPresets } from "./presets.seed.js";
+import { NVR_USERNAME, NVR_PASSWORD, EDGE_PORT, EDGE_USER, EDGE_PASS } from "./env.config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dbPath = join(__dirname, "../../../nvr.db");
@@ -68,6 +69,24 @@ function initializeDb() {
         }
       }
     );
+
+    db.run(
+      `CREATE TABLE IF NOT EXISTS edge_nodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT UNIQUE NOT NULL,
+        port INTEGER NOT NULL DEFAULT 22,
+        username TEXT NOT NULL DEFAULT 'root',
+        password TEXT NOT NULL DEFAULT 'tecno26',
+        label TEXT
+      )`,
+      (err) => {
+        if (err) {
+          console.error("Error al crear la tabla de edge_nodes:", err);
+        } else {
+          checkAndSeedNodes();
+        }
+      }
+    );
   });
 }
 
@@ -91,8 +110,8 @@ function seedUser() {
         return;
       }
 
-      const defaultUser = "tecnologia";
-      const defaultPass = "Tecn02026+";
+      const defaultUser = NVR_USERNAME;
+      const defaultPass = NVR_PASSWORD;
       const hashedPassword = hashPassword(defaultPass);
       
       db.run(
@@ -149,6 +168,69 @@ function seedLayouts() {
           console.error("Error al finalizar la siembra de layouts:", errFinal);
         } else {
           console.log("Layouts de fábrica sembrados con éxito en SQLite.");
+        }
+      });
+    });
+  });
+}
+
+export function getEdgeNodesFromDb() {
+  return new Promise((resolve, reject) => {
+    db.all("SELECT * FROM edge_nodes", [], (err, rows) => {
+      if (err) {
+        console.error("Error al obtener nodos edge de SQLite:", err);
+        reject(err);
+      } else {
+        resolve(rows);
+      }
+    });
+  });
+}
+
+function checkAndSeedNodes() {
+  db.get("SELECT COUNT(*) as count FROM edge_nodes", [], (err, row) => {
+    if (err) {
+      console.error("Error al contar nodos en SQLite:", err);
+    } else if (!row || row.count === 0) {
+      seedNodes();
+    } else {
+      console.log("Base de datos ya cuenta con nodos edge registrados. Omitiendo siembra.");
+    }
+  });
+}
+
+function seedNodes() {
+  db.serialize(() => {
+    db.run("DELETE FROM edge_nodes", [], (err) => {
+      if (err) {
+        console.error("Error al limpiar la tabla de edge_nodes:", err);
+        return;
+      }
+
+      const stmt = db.prepare(
+        "INSERT INTO edge_nodes (ip, port, username, password, label) VALUES (?, ?, ?, ?, ?)"
+      );
+      
+      const defaultNodes = [
+        { ip: "192.168.1.101", label: "Nodo Principal" },
+        { ip: "192.168.1.102", label: "Nodo Secundario" }
+      ];
+
+      for (const node of defaultNodes) {
+        stmt.run([
+          node.ip,
+          parseInt(EDGE_PORT, 10) || 22,
+          EDGE_USER || "root",
+          EDGE_PASS || "tecno26",
+          node.label
+        ]);
+      }
+
+      stmt.finalize((errFinal) => {
+        if (errFinal) {
+          console.error("Error al finalizar la siembra de nodos edge:", errFinal);
+        } else {
+          console.log("Nodos edge por defecto sembrados con éxito en SQLite.");
         }
       });
     });

@@ -5,7 +5,9 @@ export const validateStreamRequest = (req, res, next) => {
   // 1. Validación de Dispositivo (Obligatorio para cualquier acción)
   if (!dev) return res.status(400).json({ error: 'Falta "dev"' });
 
-  if (!/^\/dev\/video[0-9]+$/.test(dev)) {
+  const realDev = dev.includes(":") ? dev.split(":").pop() : dev;
+
+  if (!/^\/dev\/(video|cam)[a-zA-Z0-9_]+$/.test(realDev)) {
     return res
       .status(400)
       .json({ error: "Dispositivo 'dev' inválido. Debe ser /dev/videoX" });

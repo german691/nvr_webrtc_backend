@@ -1,11 +1,12 @@
 import { executeRemoteCommand, activeStreams } from "./camera.helper.js";
-import { EDGE_HOST, DEBUG_MODE } from "../config/env.config.js";
+import { DEBUG_MODE } from "../config/env.config.js";
 import {
   MOCK_CAMERAS,
   DEFAULT_UVC_CONTROLS,
   USEFUL_UVC_CONTROLS,
 } from "../config/camera.constants.js";
 import { parseFfmpegProcesses } from "../utils/ffmpegParser.js";
+import { getEdgeNodesFromDb } from "../config/db.js";
 
 // Almacén en memoria persistente para controles UVC ficticios en modo depuración
 export const mockControlsValues = new Map();
@@ -31,36 +32,58 @@ const getMockControls = (dev) => {
 /**
  * Sincroniza el mapa activeStreams en memoria con los procesos FFmpeg reales en el host remoto.
  */
-export const syncActiveStreamsWithHost = async () => {
+export const syncActiveStreamsWithHost = async (targetNodeIp = null) => {
   if (DEBUG_MODE) return;
   try {
-    const rawOutput = await executeRemoteCommand(
-      "ps aux | grep ffmpeg | grep -v grep || true"
-    );
-
-    const activeProcesses = parseFfmpegProcesses(rawOutput);
+    let nodes = await getEdgeNodesFromDb();
+    if (targetNodeIp) {
+      nodes = nodes.filter((n) => n.ip === targetNodeIp);
+    }
     const foundDevices = new Set();
 
-    for (let proc of activeProcesses) {
-      if (proc.device) {
-        foundDevices.add(proc.device);
-        activeStreams.set(proc.device, {
-          pid: proc.pid,
-          resolution: proc.resolution,
-          fps: proc.fps,
-          bitrate: proc.bitrate,
-        });
-      }
-    }
+    await Promise.all(
+      nodes.map(async (node) => {
+        try {
+          const rawOutput = await executeRemoteCommand(
+            node,
+            "ps aux | grep ffmpeg | grep -v grep || true"
+          );
 
-    // Eliminamos de activeStreams cualquier dispositivo que ya no tenga proceso activo en el host remoto
-    for (let dev of activeStreams.keys()) {
-      if (!foundDevices.has(dev)) {
-        activeStreams.delete(dev);
+          const activeProcesses = parseFfmpegProcesses(rawOutput);
+
+          for (let proc of activeProcesses) {
+            if (proc.device) {
+              const devKey = `${node.ip}:${proc.device}`;
+              foundDevices.add(devKey);
+              activeStreams.set(devKey, {
+                pid: proc.pid,
+                resolution: proc.resolution,
+                fps: proc.fps,
+                bitrate: proc.bitrate,
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`Error al sincronizar activeStreams con el host ${node.ip}:`, err.message);
+        }
+      })
+    );
+
+    // Eliminamos de activeStreams cualquier dispositivo que ya no tenga proceso activo en los hosts remotos sincronizados
+    for (let devKey of activeStreams.keys()) {
+      const [hostIp] = devKey.split(":");
+      if (targetNodeIp) {
+        if (hostIp === targetNodeIp && !foundDevices.has(devKey)) {
+          activeStreams.delete(devKey);
+        }
+      } else {
+        if (!foundDevices.has(devKey)) {
+          activeStreams.delete(devKey);
+        }
       }
     }
   } catch (error) {
-    console.error("Error al sincronizar activeStreams con el host:", error.message);
+    console.error("Error al sincronizar activeStreams con los hosts:", error.message);
   }
 };
 
@@ -69,18 +92,93 @@ export const syncActiveStreamsWithHost = async () => {
  * Obtiene el listado de cámaras activas en el sistema, detectando capacidades y estados de stream activos.
  */
 export const getCameras = async (req, res) => {
-  try {
-    if (DEBUG_MODE) {
-      const response = MOCK_CAMERAS.map((cam) => {
-        const streamPath = cam.dev.replace("/dev/", "");
-        const activeStream = activeStreams.get(cam.dev);
+  const { nodeIp } = req.query;
 
-        return {
-          dev: cam.dev,
-          name: cam.name,
+  try {
+    let nodes = [];
+    try {
+      nodes = await getEdgeNodesFromDb();
+    } catch (err) {
+      if (DEBUG_MODE) {
+        nodes = [{ ip: "192.168.1.101", label: "Nodo Principal" }, { ip: "192.168.1.102", label: "Nodo Secundario" }];
+      } else {
+        throw err;
+      }
+    }
+    if (nodes.length === 0 && DEBUG_MODE) {
+      nodes = [{ ip: "192.168.1.101", label: "Nodo Principal" }, { ip: "192.168.1.102", label: "Nodo Secundario" }];
+    }
+
+    // SI NO hay nodeIp, devolvemos INSTANTÁNEAMENTE la lista de nodos desde la DB (o mocks)
+    if (!nodeIp) {
+      const nodeList = nodes.map((node) => ({
+        ip: node.ip,
+        label: node.label || `Nodo ${node.ip}`,
+        isNode: true,
+      }));
+      return res.json(nodeList);
+    }
+
+    // SI HAY nodeIp, consultamos SOLO ese nodo
+    const node = nodes.find((n) => n.ip === nodeIp);
+    if (!node) {
+      return res.status(404).json({ error: `Nodo con IP ${nodeIp} no configurado.` });
+    }
+
+    if (DEBUG_MODE) {
+      const nodeIndex = nodes.findIndex((n) => n.ip === nodeIp);
+      const response = MOCK_CAMERAS.filter((cam, idx) => idx % nodes.length === nodeIndex)
+        .map((cam) => {
+          const devKey = `${node.ip}:${cam.dev}`;
+          const streamPath = cam.dev.replace("/dev/", "");
+          const activeStream = activeStreams.get(devKey);
+
+          return {
+            dev: devKey,
+            name: `${cam.name} (${node.label || node.ip})`,
+            modes: cam.modes,
+            streaming: !!activeStream,
+            webrtc_url: activeStream ? `mock://${node.ip}:8889/${streamPath}` : null,
+            active_settings: activeStream
+              ? {
+                  resolution: activeStream.resolution,
+                  fps: activeStream.fps,
+                  bitrate: activeStream.bitrate,
+                }
+              : null,
+          };
+        });
+
+      return res.json(response);
+    }
+
+    // Sincronizamos dinámicamente con los procesos reales en el host remoto específico
+    await syncActiveStreamsWithHost(node.ip);
+
+    const response = [];
+    try {
+      const rawJson = await executeRemoteCommand(
+        node,
+        "/usr/local/bin/get_capabilities.sh"
+      );
+      const cameras = JSON.parse(rawJson);
+      const validCameras = cameras.filter(
+        (cam) => cam.modes && cam.modes.length > 0
+      );
+
+      for (const cam of validCameras) {
+        const devKey = `${node.ip}:${cam.dev}`;
+        const streamPath = cam.dev.replace("/dev/", "");
+        const activeStream = activeStreams.get(devKey);
+
+        response.push({
+          dev: devKey,
+          name: `${cam.name} (${node.label || node.ip})`,
           modes: cam.modes,
           streaming: !!activeStream,
-          webrtc_url: activeStream ? `mock://${streamPath}` : null,
+          webrtc_url: activeStream
+            ? `http://${node.ip}:8889/${streamPath}`
+            : null,
           active_settings: activeStream
             ? {
                 resolution: activeStream.resolution,
@@ -88,45 +186,15 @@ export const getCameras = async (req, res) => {
                 bitrate: activeStream.bitrate,
               }
             : null,
-        };
+        });
+      }
+    } catch (err) {
+      console.error(`Error de conexión con el nodo ${node.label || node.ip}:`, err.message);
+      return res.status(503).json({
+        error: `Error de conexión con el nodo ${node.label || node.ip}`,
+        details: err.message,
       });
-
-      return res.json(response);
     }
-
-    // Sincronizamos dinámicamente con los procesos reales en el host remoto
-    await syncActiveStreamsWithHost();
-
-    const rawJson = await executeRemoteCommand(
-      "/usr/local/bin/get_capabilities.sh"
-    );
-    const cameras = JSON.parse(rawJson);
-
-    const validCameras = cameras.filter(
-      (cam) => cam.modes && cam.modes.length > 0
-    );
-
-    const response = validCameras.map((cam) => {
-      const streamPath = cam.dev.replace("/dev/", "");
-      const activeStream = activeStreams.get(cam.dev);
-
-      return {
-        dev: cam.dev,
-        name: cam.name,
-        modes: cam.modes,
-        streaming: !!activeStream,
-        webrtc_url: activeStream
-          ? `http://${EDGE_HOST}:8889/${streamPath}`
-          : null,
-        active_settings: activeStream
-          ? {
-              resolution: activeStream.resolution,
-              fps: activeStream.fps,
-              bitrate: activeStream.bitrate,
-            }
-          : null,
-      };
-    });
 
     res.json(response);
   } catch (error) {
@@ -143,6 +211,9 @@ export const getCameras = async (req, res) => {
 export const controlStream = async (req, res) => {
   const { dev, resolution, fps, cleanBitrate, action } = req.body;
 
+  // Extraemos host y dispositivo real
+  const [host, realDev] = dev.includes(":") ? dev.split(":") : [null, dev];
+
   if (DEBUG_MODE) {
     try {
       if (action === "stop") {
@@ -154,7 +225,7 @@ export const controlStream = async (req, res) => {
       }
 
       activeStreams.delete(dev);
-      const streamPath = dev.replace("/dev/", "");
+      const streamPath = realDev.replace("/dev/", "");
       const mockPid = Math.floor(Math.random() * 10000) + 5000;
 
       activeStreams.set(dev, {
@@ -168,12 +239,12 @@ export const controlStream = async (req, res) => {
         status: "success",
         message: `[MOCK] Hardware activado a ${resolution} @ ${fps} FPS.`,
         pid: mockPid,
-        webrtc_url: `mock://${streamPath}`,
+        webrtc_url: `mock://${host || "localhost"}:8889/${streamPath}`,
         active_settings: {
           resolution,
           fps,
           bitrate: cleanBitrate,
-          data: `[MOCK] ffmpeg -hide_banner -vaapi_device /dev/dri/renderD128 -f v4l2 -video_size ${resolution} -framerate ${fps} -i ${dev} -f rtsp rtsp://localhost:8554/${streamPath}`,
+          data: `[MOCK] ffmpeg -hide_banner -vaapi_device /dev/dri/renderD128 -f v4l2 -video_size ${resolution} -framerate ${fps} -i ${realDev} -f rtsp rtsp://localhost:8554/${streamPath}`,
         },
       });
     } catch (error) {
@@ -184,9 +255,15 @@ export const controlStream = async (req, res) => {
   }
 
   try {
+    const nodes = await getEdgeNodesFromDb();
+    const node = nodes.find((n) => n.ip === host) || nodes[0];
+    if (!node) {
+      throw new Error(`Nodo no configurado para el host: ${host}`);
+    }
+
     if (action === "stop") {
-      const stopCmd = `pkill -9 -f "ffmpeg.*-i ${dev}" || true`;
-      await executeRemoteCommand(stopCmd);
+      const stopCmd = `pkill -9 -f "ffmpeg.*-i ${realDev}" || true`;
+      await executeRemoteCommand(node, stopCmd);
       activeStreams.delete(dev);
 
       return res.json({
@@ -197,19 +274,19 @@ export const controlStream = async (req, res) => {
 
     let bitrateArg = cleanBitrate ? `-b:v ${cleanBitrate}` : "";
 
-    const killCmd = `pkill -9 -f "ffmpeg.*-i ${dev}" || true`;
-    await executeRemoteCommand(killCmd);
+    const killCmd = `pkill -9 -f "ffmpeg.*-i ${realDev}" || true`;
+    await executeRemoteCommand(node, killCmd);
     activeStreams.delete(dev);
 
-    const streamPath = dev.replace("/dev/", "");
+    const streamPath = realDev.replace("/dev/", "");
 
     const ffmpegCmd = `/usr/bin/ffmpeg -hide_banner -loglevel error \
       -vaapi_device /dev/dri/renderD128 \
-      -f v4l2 -input_format mjpeg -video_size ${resolution} -framerate ${fps} -i ${dev} \
+      -f v4l2 -input_format mjpeg -video_size ${resolution} -framerate ${fps} -i ${realDev} \
       -vf 'format=nv12,hwupload' -c:v h264_vaapi -bf 0 ${bitrateArg ? bitrateArg + " " : ""}\
       -f rtsp rtsp://localhost:8554/${streamPath} > /dev/null 2>&1 & echo \$!`;
 
-    const assignedPid = await executeRemoteCommand(ffmpegCmd);
+    const assignedPid = await executeRemoteCommand(node, ffmpegCmd);
     const pidNum = parseInt(assignedPid, 10);
 
     if (!assignedPid || isNaN(pidNum)) {
@@ -229,7 +306,7 @@ export const controlStream = async (req, res) => {
       status: "success",
       message: `Hardware activado a ${resolution} @ ${fps} FPS.`,
       pid: pidNum,
-      webrtc_url: `http://${EDGE_HOST}:8889/${streamPath}`,
+      webrtc_url: `http://${node.ip}:8889/${streamPath}`,
       active_settings: {
         resolution,
         fps,
@@ -251,7 +328,10 @@ export const controlStream = async (req, res) => {
 export const getCameraControls = async (req, res) => {
   const { dev } = req.query;
 
-  if (!dev || !/^\/dev\/(video|cam)[a-zA-Z0-9_]+$/.test(dev)) {
+  // Extraemos host y dispositivo real
+  const [host, realDev] = dev.includes(":") ? dev.split(":") : [null, dev];
+
+  if (!realDev || !/^\/dev\/(video|cam)[a-zA-Z0-9_]+$/.test(realDev)) {
     return res.status(400).json({ error: "Dispositivo 'dev' inválido" });
   }
 
@@ -261,17 +341,22 @@ export const getCameraControls = async (req, res) => {
   }
 
   try {
+    const nodes = await getEdgeNodesFromDb();
+    const node = nodes.find((n) => n.ip === host) || nodes[0];
+    if (!node) {
+      throw new Error(`Nodo no configurado para el host: ${host}`);
+    }
+
     // Consultamos los controles nativos directamente al hardware
     const rawOutput = await executeRemoteCommand(
-      `v4l2-ctl -d ${dev} --list-ctrls`
+      node,
+      `v4l2-ctl -d ${realDev} --list-ctrls`
     );
 
     const controls = [];
     const lines = rawOutput.split("\n");
 
     for (let line of lines) {
-      // Parseamos la salida de v4l2-ctl mediante Expresiones Regulares
-      // Ejemplo: "brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128"
       const match = line.match(
         /^\s*([a-zA-Z0-9_]+).*?\((int|bool|menu)\)\s*:\s*(.*)$/
       );
@@ -283,7 +368,6 @@ export const getCameraControls = async (req, res) => {
 
         const control = { name, type };
 
-        // Extraemos min, max, step y value
         propsStr.split(" ").forEach((prop) => {
           const [key, val] = prop.split("=");
           if (key && val !== undefined) {
@@ -291,7 +375,6 @@ export const getCameraControls = async (req, res) => {
           }
         });
 
-        // Filtramos solo los controles útiles para la interfaz gráfica
         if (USEFUL_UVC_CONTROLS.includes(name)) {
           controls.push(control);
         }
@@ -320,6 +403,9 @@ export const setCameraControl = async (req, res) => {
       .json({ error: "Faltan parámetros (dev, controlName, value)" });
   }
 
+  // Extraemos host y dispositivo real
+  const [host, realDev] = dev.includes(":") ? dev.split(":") : [null, dev];
+
   if (DEBUG_MODE) {
     const key = `${dev}:${controlName}`;
     mockControlsValues.set(key, parseInt(value, 10));
@@ -330,9 +416,14 @@ export const setCameraControl = async (req, res) => {
   }
 
   try {
-    // Inyectamos el comando UVC directamente en la Mini-PC
-    const cmd = `v4l2-ctl -d ${dev} --set-ctrl=${controlName}=${value}`;
-    await executeRemoteCommand(cmd);
+    const nodes = await getEdgeNodesFromDb();
+    const node = nodes.find((n) => n.ip === host) || nodes[0];
+    if (!node) {
+      throw new Error(`Nodo no configurado para el host: ${host}`);
+    }
+
+    const cmd = `v4l2-ctl -d ${realDev} --set-ctrl=${controlName}=${value}`;
+    await executeRemoteCommand(node, cmd);
 
     res.json({
       status: "success",
@@ -353,10 +444,11 @@ export const getFfmpegDebug = async (req, res) => {
   if (DEBUG_MODE) {
     const streams = [];
     for (const [dev, stream] of activeStreams.entries()) {
+      const [host, realDev] = dev.includes(":") ? dev.split(":") : ["localhost", dev];
       const mockCpu = (12 + Math.random() * 10).toFixed(1);
       const mockMem = (1.5 + Math.random() * 1.0).toFixed(1);
       const mockRss = Math.floor(40000 + Math.random() * 8000);
-      const streamPath = dev.replace("/dev/", "");
+      const streamPath = realDev.replace("/dev/", "");
 
       streams.push({
         user: "root",
@@ -372,8 +464,8 @@ export const getFfmpegDebug = async (req, res) => {
         fps: stream.fps,
         bitrate: stream.bitrate,
         vaapi: "/dev/dri/renderD128",
-        rtspUrl: `rtsp://localhost:8554/${streamPath}`,
-        command: `/usr/bin/ffmpeg -hide_banner -vaapi_device /dev/dri/renderD128 -f v4l2 -input_format mjpeg -video_size ${stream.resolution} -framerate ${stream.fps} -i ${dev} -vf format=nv12,hwupload -c:v h264_vaapi -bf 0 -b:v ${stream.bitrate} -f rtsp rtsp://localhost:8554/${streamPath}`,
+        rtspUrl: `rtsp://${host}:8554/${streamPath}`,
+        command: `/usr/bin/ffmpeg -hide_banner -vaapi_device /dev/dri/renderD128 -f v4l2 -input_format mjpeg -video_size ${stream.resolution} -framerate ${stream.fps} -i ${realDev} -vf format=nv12,hwupload -c:v h264_vaapi -bf 0 -b:v ${stream.bitrate} -f rtsp rtsp://localhost:8554/${streamPath}`,
       });
     }
     return res.json({
@@ -383,16 +475,35 @@ export const getFfmpegDebug = async (req, res) => {
   }
 
   try {
-    // Ejecutamos ps aux filtrando ffmpeg y omitiendo el propio grep
-    const rawOutput = await executeRemoteCommand(
-      "ps aux | grep ffmpeg | grep -v grep || true"
-    );
+    const nodes = await getEdgeNodesFromDb();
+    const allStreams = [];
 
-    const streams = parseFfmpegProcesses(rawOutput);
+    await Promise.all(
+      nodes.map(async (node) => {
+        try {
+          const rawOutput = await executeRemoteCommand(
+            node,
+            "ps aux | grep ffmpeg | grep -v grep || true"
+          );
+          const streams = parseFfmpegProcesses(rawOutput);
+          for (let stream of streams) {
+            if (stream.device) {
+              allStreams.push({
+                ...stream,
+                device: `${node.ip}:${stream.device}`,
+                rtspUrl: `rtsp://${node.ip}:8554/${stream.device.replace("/dev/", "")}`,
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`Error al obtener depuración del nodo ${node.ip}:`, err.message);
+        }
+      })
+    );
 
     res.json({
       status: "success",
-      streams,
+      streams: allStreams,
     });
   } catch (error) {
     res.status(500).json({
@@ -429,13 +540,36 @@ export const killFfmpegProcess = async (req, res) => {
   }
 
   try {
-    const cmd = `kill -9 ${pidNum}`;
-    await executeRemoteCommand(cmd);
+    const nodes = await getEdgeNodesFromDb();
+    let targetNode = null;
 
-    // Sincronizamos activeStreams
-    for (let [dev, stream] of activeStreams.entries()) {
+    for (let [devKey, stream] of activeStreams.entries()) {
       if (stream.pid === pidNum) {
-        activeStreams.delete(dev);
+        const [host] = devKey.split(":");
+        targetNode = nodes.find((n) => n.ip === host);
+        break;
+      }
+    }
+
+    const cmd = `kill -9 ${pidNum}`;
+
+    if (targetNode) {
+      await executeRemoteCommand(targetNode, cmd);
+    } else {
+      await Promise.all(
+        nodes.map(async (node) => {
+          try {
+            await executeRemoteCommand(node, cmd);
+          } catch (err) {
+            // Ignoramos errores individuales en el fallback
+          }
+        })
+      );
+    }
+
+    for (let [devKey, stream] of activeStreams.entries()) {
+      if (stream.pid === pidNum) {
+        activeStreams.delete(devKey);
       }
     }
 
@@ -466,10 +600,19 @@ export const killAllFfmpegProcesses = async (req, res) => {
   }
 
   try {
+    const nodes = await getEdgeNodesFromDb();
     const cmd = 'pkill -9 -f "ffmpeg" || true';
-    await executeRemoteCommand(cmd);
 
-    // Sincronizamos activeStreams limpiándolo en su totalidad
+    await Promise.all(
+      nodes.map(async (node) => {
+        try {
+          await executeRemoteCommand(node, cmd);
+        } catch (err) {
+          console.error(`Error al detener procesos en el nodo ${node.ip}:`, err.message);
+        }
+      })
+    );
+
     activeStreams.clear();
 
     res.json({

@@ -75,7 +75,9 @@ export const DEFAULT_UVC_CONTROLS = [
   { name: "gamma", type: "int", min: 90, max: 150, step: 1, default: 100 },
   { name: "focus_auto", type: "bool", min: 0, max: 1, step: 1, default: 1 },
   { name: "focus_absolute", type: "int", min: 0, max: 250, step: 5, default: 50 },
-  { name: "zoom_absolute", type: "int", min: 100, max: 500, step: 10, default: 100 }
+  { name: "zoom_absolute", type: "int", min: 100, max: 500, step: 10, default: 100 },
+  { name: "pan_absolute", type: "int", min: -36000, max: 36000, step: 3600, default: 0 },
+  { name: "tilt_absolute", type: "int", min: -36000, max: 36000, step: 3600, default: 0 }
 ];
 
 export const USEFUL_UVC_CONTROLS = [
@@ -93,4 +95,6 @@ export const USEFUL_UVC_CONTROLS = [
   "zoom_absolute",
   "zoom",
   "zoom_auto",
+  "pan_absolute",
+  "tilt_absolute"
 ];
