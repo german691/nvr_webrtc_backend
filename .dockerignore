@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+.dockerignore
+Dockerfile
+nvr.db
+nvr.db-journal
