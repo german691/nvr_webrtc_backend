@@ -7,6 +7,7 @@ import {
   getFfmpegDebug,
   killFfmpegProcess,
   killAllFfmpegProcesses,
+  saveCameraLabel,
 } from "./domains/camera.controller.js";
 import {
   getLayouts,
@@ -70,6 +71,7 @@ router.delete("/nodes/:id", authMiddleware, adminMiddleware, deleteNode);
 router.use("/cameras", authMiddleware);
 router.get("/cameras", getCameras);
 router.post("/cameras/stream", validateStreamRequest, controlStream);
+router.post("/cameras/label", saveCameraLabel);
 
 router.get("/cameras/controls", getCameraControls);
 router.post("/cameras/controls", setCameraControl);

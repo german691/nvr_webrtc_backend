@@ -7,6 +7,7 @@ import {
 } from "../config/camera.constants.js";
 import { parseFfmpegProcesses } from "../utils/ffmpegParser.js";
 import { getEdgeNodesFromDb } from "../config/db.js";
+import { CameraRepository } from "./camera.repository.js";
 
 // Almacén en memoria persistente para controles UVC ficticios en modo depuración
 export const mockControlsValues = new Map();
@@ -127,15 +128,21 @@ export const getCameras = async (req, res) => {
 
     if (DEBUG_MODE) {
       const nodeIndex = nodes.findIndex((n) => n.ip === nodeIp);
+      const labelsMap = await CameraRepository.getAllLabels(node.ip);
       const response = MOCK_CAMERAS.filter((cam, idx) => idx % nodes.length === nodeIndex)
         .map((cam) => {
           const devKey = `${node.ip}:${cam.dev}`;
           const streamPath = cam.dev.replace("/dev/", "");
           const activeStream = activeStreams.get(devKey);
 
+          // Generar una ruta física persistente simulada (mock)
+          const mockPersistentPath = `/dev/v4l/by-path/mock-usb-port-${cam.dev.replace("/dev/video", "")}`;
+          const savedLabel = labelsMap[mockPersistentPath];
+
           return {
             dev: devKey,
-            name: `${cam.name} (${node.label || node.ip})`,
+            persistent_path: mockPersistentPath,
+            name: savedLabel ? `${savedLabel} (${node.label || node.ip})` : `${cam.name} (${node.label || node.ip})`,
             modes: cam.modes,
             streaming: !!activeStream,
             webrtc_url: activeStream ? `mock://${node.ip}:8889/${streamPath}` : null,
@@ -157,23 +164,55 @@ export const getCameras = async (req, res) => {
 
     const response = [];
     try {
+      // 1. Obtener las capacidades de las cámaras conectadas al nodo
       const rawJson = await executeRemoteCommand(
         node,
         "/usr/local/bin/get_capabilities.sh"
       );
       const cameras = JSON.parse(rawJson);
       const validCameras = cameras.filter(
-        (cam) => cam.modes && cam.modes.length > 0
+        (cam) => cam.dev && cam.modes && cam.modes.length > 0
       );
+
+      // 2. Mapear de forma dinámica las rutas simbólicas físicas (/dev/v4l/by-path/) a /dev/video*
+      const pathMapping = {};
+      try {
+        const mapCmd = `find /dev/v4l/by-path/ -type l -exec sh -c 'echo "$(readlink -f "$1")|$1"' _ {} \\; 2>/dev/null || true`;
+        const rawMap = await executeRemoteCommand(node, mapCmd);
+        
+        if (rawMap) {
+          rawMap.split("\n").forEach((line) => {
+            const parts = line.trim().split("|");
+            if (parts.length === 2) {
+              pathMapping[parts[0]] = parts[1];
+            }
+          });
+        }
+      } catch (mapErr) {
+        console.warn("Fallo al resolver los puertos físicos USB en el nodo:", mapErr.message);
+      }
+
+      // 3. Traer todos los rótulos guardados para este nodo
+      const labelsMap = await CameraRepository.getAllLabels(node.ip);
 
       for (const cam of validCameras) {
         const devKey = `${node.ip}:${cam.dev}`;
         const streamPath = cam.dev.replace("/dev/", "");
         const activeStream = activeStreams.get(devKey);
 
+        // Intentar obtener la ruta física persistente USB de la cámara
+        const persistentPath = pathMapping[cam.dev] || cam.dev;
+        const savedLabel = labelsMap[persistentPath];
+
+        // Rótulo amigable o nombre del hardware por defecto
+        const finalName = savedLabel 
+          ? `${savedLabel} (${node.label || node.ip})`
+          : `${cam.name} (${node.label || node.ip})`;
+
         response.push({
           dev: devKey,
-          name: `${cam.name} (${node.label || node.ip})`,
+          persistent_path: persistentPath,
+          name: finalName,
           modes: cam.modes,
           streaming: !!activeStream,
           webrtc_url: activeStream
@@ -623,6 +662,34 @@ export const killAllFfmpegProcesses = async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: "Error finalizando todas las transmisiones de cámaras",
+      details: error.message,
+    });
+  }
+};
+
+/**
+ * POST /api/cameras/label
+ * Guarda o actualiza un rótulo amigable permanente para un puerto USB físico de cámara.
+ */
+export const saveCameraLabel = async (req, res) => {
+  const { nodeIp, persistentPath, customName } = req.body;
+
+  if (!nodeIp || !persistentPath || customName === undefined) {
+    return res
+      .status(400)
+      .json({ error: "Faltan parámetros requeridos (nodeIp, persistentPath, customName)" });
+  }
+
+  try {
+    const result = await CameraRepository.saveLabel(nodeIp, persistentPath, customName);
+    res.json({
+      status: "success",
+      message: "Rótulo de cámara guardado con éxito.",
+      data: result,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: "Fallo al guardar el rótulo en la base de datos.",
       details: error.message,
     });
   }

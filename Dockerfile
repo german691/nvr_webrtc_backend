@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 COPY package*.json ./
 
 # Instalar solo dependencias de producción de forma limpia y rápida
-RUN npm ci --only=production --prefer-offline --no-audit
+RUN npm ci --only=production --prefer-offline --no-audit --build-from-source
 
 # Copiar el resto del código fuente del backend
 COPY . .

@@ -1,12 +1,16 @@
 import sqlite3 from "sqlite3";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
+import fs from "fs";
 import { dirname, join } from "path";
 import { initialPresets } from "./presets.seed.js";
 import { NVR_USERNAME, NVR_PASSWORD, EDGE_PORT, EDGE_USER, EDGE_PASS } from "./env.config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dbPath = join(__dirname, "../../../nvr.db");
+const dbPath = join(__dirname, "../../data/nvr.db");
+
+// Asegurar que exista el directorio padre para evitar errores SQLITE_CANTOPEN
+fs.mkdirSync(dirname(dbPath), { recursive: true });
 
 export const hashPassword = (password) => {
   return crypto.createHash("sha256").update(password).digest("hex");
@@ -84,6 +88,20 @@ function initializeDb() {
           console.error("Error al crear la tabla de edge_nodes:", err);
         } else {
           checkAndSeedNodes();
+        }
+      }
+    );
+
+    db.run(
+      `CREATE TABLE IF NOT EXISTS camera_labels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_ip TEXT NOT NULL,
+        persistent_path TEXT UNIQUE NOT NULL,
+        custom_name TEXT NOT NULL
+      )`,
+      (err) => {
+        if (err) {
+          console.error("Error al crear la tabla de camera_labels:", err);
         }
       }
     );
