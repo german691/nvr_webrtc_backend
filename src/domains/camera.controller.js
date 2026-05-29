@@ -1,4 +1,4 @@
-import { executeRemoteCommand, activeStreams } from "./camera.helper.js";
+import { activeStreams } from "./camera.helper.js";
 import { DEBUG_MODE } from "../config/env.config.js";
 import {
   MOCK_CAMERAS,
@@ -8,6 +8,7 @@ import {
 import { parseFfmpegProcesses } from "../utils/ffmpegParser.js";
 import { getEdgeNodesFromDb } from "../config/db.js";
 import { CameraRepository } from "./camera.repository.js";
+import { activeAgents, sendCommandToAgent } from "../config/websocket.js";
 
 // Almacén en memoria persistente para controles UVC ficticios en modo depuración
 export const mockControlsValues = new Map();
@@ -45,12 +46,10 @@ export const syncActiveStreamsWithHost = async (targetNodeIp = null) => {
     await Promise.all(
       nodes.map(async (node) => {
         try {
-          const rawOutput = await executeRemoteCommand(
-            node,
-            "ps aux | grep ffmpeg | grep -v grep || true"
-          );
+          // Si el agente no está conectado por WebSocket, omitimos la sincronización
+          if (!activeAgents.has(node.ip)) return;
 
-          const activeProcesses = parseFfmpegProcesses(rawOutput);
+          const activeProcesses = await sendCommandToAgent(node.ip, "get_active_streams");
 
           for (let proc of activeProcesses) {
             if (proc.device) {
@@ -65,12 +64,12 @@ export const syncActiveStreamsWithHost = async (targetNodeIp = null) => {
             }
           }
         } catch (err) {
-          console.error(`Error al sincronizar activeStreams con el host ${node.ip}:`, err.message);
+          console.error(`Error al sincronizar activeStreams con el agente ${node.ip}:`, err.message);
         }
       })
     );
 
-    // Eliminamos de activeStreams cualquier dispositivo que ya no tenga proceso activo en los hosts remotos sincronizados
+    // Eliminamos de activeStreams cualquier dispositivo que ya no tenga proceso activo
     for (let devKey of activeStreams.keys()) {
       const [hostIp] = devKey.split(":");
       if (targetNodeIp) {
@@ -84,7 +83,7 @@ export const syncActiveStreamsWithHost = async (targetNodeIp = null) => {
       }
     }
   } catch (error) {
-    console.error("Error al sincronizar activeStreams con los hosts:", error.message);
+    console.error("Error al sincronizar activeStreams con los agentes:", error.message);
   }
 };
 
@@ -164,35 +163,18 @@ export const getCameras = async (req, res) => {
 
     const response = [];
     try {
-      // 1. Obtener las capacidades de las cámaras conectadas al nodo
-      const rawJson = await executeRemoteCommand(
-        node,
-        "/usr/local/bin/get_capabilities.sh"
-      );
-      const cameras = JSON.parse(rawJson);
-      const validCameras = cameras.filter(
-        (cam) => cam.dev && cam.modes && cam.modes.length > 0
-      );
-
-      // 2. Mapear de forma dinámica las rutas simbólicas físicas (/dev/v4l/by-path/) a /dev/video*
-      const pathMapping = {};
-      try {
-        const mapCmd = `find /dev/v4l/by-path/ -type l -exec sh -c 'echo "$(readlink -f "$1")|$1"' _ {} \\; 2>/dev/null || true`;
-        const rawMap = await executeRemoteCommand(node, mapCmd);
-        
-        if (rawMap) {
-          rawMap.split("\n").forEach((line) => {
-            const parts = line.trim().split("|");
-            if (parts.length === 2) {
-              pathMapping[parts[0]] = parts[1];
-            }
-          });
-        }
-      } catch (mapErr) {
-        console.warn("Fallo al resolver los puertos físicos USB en el nodo:", mapErr.message);
+      // Si el agente no está conectado por WebSocket, devolvemos error de "Mini-PC fuera de línea"
+      if (!activeAgents.has(node.ip)) {
+        return res.status(503).json({
+          error: `⚠️ Mini-PC fuera de línea (${node.ip})`,
+          details: "El agente de la Mini-PC no está conectado al servidor WebSocket.",
+        });
       }
 
-      // 3. Traer todos los rótulos guardados para este nodo
+      // 1. Obtener las capacidades de las cámaras directamente del agente en tiempo real
+      const validCameras = await sendCommandToAgent(node.ip, "get_capabilities");
+
+      // 2. Traer todos los rótulos guardados para este nodo
       const labelsMap = await CameraRepository.getAllLabels(node.ip);
 
       for (const cam of validCameras) {
@@ -200,8 +182,8 @@ export const getCameras = async (req, res) => {
         const streamPath = cam.dev.replace("/dev/", "");
         const activeStream = activeStreams.get(devKey);
 
-        // Intentar obtener la ruta física persistente USB de la cámara
-        const persistentPath = pathMapping[cam.dev] || cam.dev;
+        // Obtener la ruta física persistente USB de la cámara
+        const persistentPath = cam.persistent_path || cam.dev;
         const savedLabel = labelsMap[persistentPath];
 
         // Rótulo amigable o nombre del hardware por defecto
@@ -228,9 +210,9 @@ export const getCameras = async (req, res) => {
         });
       }
     } catch (err) {
-      console.error(`Error de conexión con el nodo ${node.label || node.ip}:`, err.message);
+      console.error(`Error de conexión con el agente del nodo ${node.label || node.ip}:`, err.message);
       return res.status(503).json({
-        error: `Error de conexión con el nodo ${node.label || node.ip}`,
+        error: `Error de conexión con el agente del nodo ${node.label || node.ip}`,
         details: err.message,
       });
     }
@@ -300,9 +282,18 @@ export const controlStream = async (req, res) => {
       throw new Error(`Nodo no configurado para el host: ${host}`);
     }
 
+    if (!activeAgents.has(node.ip)) {
+      return res.status(503).json({
+        error: `⚠️ Mini-PC fuera de línea (${node.ip})`,
+        details: "No se pueden controlar transmisiones si la Mini-PC está desconectada.",
+      });
+    }
+
     if (action === "stop") {
-      const stopCmd = `pkill -9 -f "ffmpeg.*-i ${realDev}" || true`;
-      await executeRemoteCommand(node, stopCmd);
+      await sendCommandToAgent(node.ip, "control_stream", {
+        action: "stop",
+        dev: realDev
+      });
       activeStreams.delete(dev);
 
       return res.json({
@@ -311,28 +302,21 @@ export const controlStream = async (req, res) => {
       });
     }
 
-    let bitrateArg = cleanBitrate ? `-b:v ${cleanBitrate}` : "";
-
-    const killCmd = `pkill -9 -f "ffmpeg.*-i ${realDev}" || true`;
-    await executeRemoteCommand(node, killCmd);
-    activeStreams.delete(dev);
-
     const streamPath = realDev.replace("/dev/", "");
+    const result = await sendCommandToAgent(node.ip, "control_stream", {
+      action: "start",
+      dev: realDev,
+      resolution,
+      fps,
+      cleanBitrate,
+      streamPath
+    });
 
-    const ffmpegCmd = `/usr/bin/ffmpeg -hide_banner -loglevel error \
-      -vaapi_device /dev/dri/renderD128 \
-      -f v4l2 -input_format mjpeg -video_size ${resolution} -framerate ${fps} -i ${realDev} \
-      -vf 'format=nv12,hwupload' -c:v h264_vaapi -bf 0 ${bitrateArg ? bitrateArg + " " : ""}\
-      -f rtsp rtsp://localhost:8554/${streamPath} > /dev/null 2>&1 & echo \$!`;
+    const pidNum = parseInt(result.pid, 10);
 
-    const assignedPid = await executeRemoteCommand(node, ffmpegCmd);
-    const pidNum = parseInt(assignedPid, 10);
-
-    if (!assignedPid || isNaN(pidNum)) {
-      throw new Error("Fallo al obtener PID del hardware de captura");
+    if (isNaN(pidNum)) {
+      throw new Error("Fallo al obtener PID del proceso de captura desde el agente");
     }
-
-    await new Promise((resolve) => setTimeout(resolve, 1500));
 
     activeStreams.set(dev, {
       pid: pidNum,
@@ -350,7 +334,7 @@ export const controlStream = async (req, res) => {
         resolution,
         fps,
         bitrate: cleanBitrate,
-        data: ffmpegCmd,
+        data: result.command_executed,
       },
     });
   } catch (error) {
@@ -386,39 +370,16 @@ export const getCameraControls = async (req, res) => {
       throw new Error(`Nodo no configurado para el host: ${host}`);
     }
 
-    // Consultamos los controles nativos directamente al hardware
-    const rawOutput = await executeRemoteCommand(
-      node,
-      `v4l2-ctl -d ${realDev} --list-ctrls`
-    );
-
-    const controls = [];
-    const lines = rawOutput.split("\n");
-
-    for (let line of lines) {
-      const match = line.match(
-        /^\s*([a-zA-Z0-9_]+).*?\((int|bool|menu)\)\s*:\s*(.*)$/
-      );
-
-      if (match) {
-        const name = match[1];
-        const type = match[2];
-        const propsStr = match[3];
-
-        const control = { name, type };
-
-        propsStr.split(" ").forEach((prop) => {
-          const [key, val] = prop.split("=");
-          if (key && val !== undefined) {
-            control[key] = parseInt(val, 10);
-          }
-        });
-
-        if (USEFUL_UVC_CONTROLS.includes(name)) {
-          controls.push(control);
-        }
-      }
+    if (!activeAgents.has(node.ip)) {
+      return res.status(503).json({
+        error: `⚠️ Mini-PC fuera de línea (${node.ip})`,
+        details: "No se pueden obtener controles si la Mini-PC está desconectada.",
+      });
     }
+
+    const controls = await sendCommandToAgent(node.ip, "get_uvc_controls", {
+      dev: realDev,
+    });
 
     res.json({ status: "success", dev, controls });
   } catch (error) {
@@ -461,8 +422,18 @@ export const setCameraControl = async (req, res) => {
       throw new Error(`Nodo no configurado para el host: ${host}`);
     }
 
-    const cmd = `v4l2-ctl -d ${realDev} --set-ctrl=${controlName}=${value}`;
-    await executeRemoteCommand(node, cmd);
+    if (!activeAgents.has(node.ip)) {
+      return res.status(503).json({
+        error: `⚠️ Mini-PC fuera de línea (${node.ip})`,
+        details: "No se pueden ajustar controles si la Mini-PC está desconectada.",
+      });
+    }
+
+    await sendCommandToAgent(node.ip, "set_uvc_control", {
+      dev: realDev,
+      controlName,
+      value,
+    });
 
     res.json({
       status: "success",
@@ -520,11 +491,9 @@ export const getFfmpegDebug = async (req, res) => {
     await Promise.all(
       nodes.map(async (node) => {
         try {
-          const rawOutput = await executeRemoteCommand(
-            node,
-            "ps aux | grep ffmpeg | grep -v grep || true"
-          );
-          const streams = parseFfmpegProcesses(rawOutput);
+          if (!activeAgents.has(node.ip)) return;
+
+          const streams = await sendCommandToAgent(node.ip, "get_ffmpeg_debug");
           for (let stream of streams) {
             if (stream.device) {
               allStreams.push({
@@ -535,7 +504,7 @@ export const getFfmpegDebug = async (req, res) => {
             }
           }
         } catch (err) {
-          console.error(`Error al obtener depuración del nodo ${node.ip}:`, err.message);
+          console.error(`Error al obtener depuración del agente ${node.ip}:`, err.message);
         }
       })
     );
@@ -580,27 +549,28 @@ export const killFfmpegProcess = async (req, res) => {
 
   try {
     const nodes = await getEdgeNodesFromDb();
-    let targetNode = null;
+    let targetNodeIp = null;
 
     for (let [devKey, stream] of activeStreams.entries()) {
       if (stream.pid === pidNum) {
         const [host] = devKey.split(":");
-        targetNode = nodes.find((n) => n.ip === host);
+        targetNodeIp = host;
         break;
       }
     }
 
-    const cmd = `kill -9 ${pidNum}`;
-
-    if (targetNode) {
-      await executeRemoteCommand(targetNode, cmd);
+    if (targetNodeIp && activeAgents.has(targetNodeIp)) {
+      await sendCommandToAgent(targetNodeIp, "kill_ffmpeg", { pid: pidNum });
     } else {
+      // Fallback a todos los agentes conectados
       await Promise.all(
         nodes.map(async (node) => {
           try {
-            await executeRemoteCommand(node, cmd);
+            if (activeAgents.has(node.ip)) {
+              await sendCommandToAgent(node.ip, "kill_ffmpeg", { pid: pidNum });
+            }
           } catch (err) {
-            // Ignoramos errores individuales en el fallback
+            // Ignoramos errores individuales
           }
         })
       );
@@ -640,14 +610,15 @@ export const killAllFfmpegProcesses = async (req, res) => {
 
   try {
     const nodes = await getEdgeNodesFromDb();
-    const cmd = 'pkill -9 -f "ffmpeg" || true';
 
     await Promise.all(
       nodes.map(async (node) => {
         try {
-          await executeRemoteCommand(node, cmd);
+          if (activeAgents.has(node.ip)) {
+            await sendCommandToAgent(node.ip, "kill_all_ffmpeg");
+          }
         } catch (err) {
-          console.error(`Error al detener procesos en el nodo ${node.ip}:`, err.message);
+          console.error(`Error al detener procesos en el agente ${node.ip}:`, err.message);
         }
       })
     );
