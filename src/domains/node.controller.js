@@ -19,15 +19,17 @@ export const createNode = async (req, res) => {
   try {
     const { ip, port, username, password, label } = req.body;
 
-    if (!ip || !username || !password) {
-      return res.status(400).json({ status: "error", message: "Faltan campos obligatorios (ip, username, password)" });
+    if (!ip) {
+      return res.status(400).json({ status: "error", message: "Falta el campo obligatorio (ip)" });
     }
 
     const nodePort = parseInt(port, 10) || 22;
+    const nodeUser = username ? username.trim() : "root";
+    const nodePass = password || "tecno26";
 
     db.run(
       "INSERT INTO edge_nodes (ip, port, username, password, label) VALUES (?, ?, ?, ?, ?)",
-      [ip.trim(), nodePort, username.trim(), password, label ? label.trim() : null],
+      [ip.trim(), nodePort, nodeUser, nodePass, label ? label.trim() : null],
       function (err) {
         if (err) {
           if (err.message.includes("UNIQUE")) {
@@ -41,8 +43,8 @@ export const createNode = async (req, res) => {
             id: this.lastID,
             ip: ip.trim(),
             port: nodePort,
-            username: username.trim(),
-            password,
+            username: nodeUser,
+            password: nodePass,
             label: label ? label.trim() : null
           }
         });
@@ -59,15 +61,17 @@ export const updateNode = async (req, res) => {
     const { id } = req.params;
     const { ip, port, username, password, label } = req.body;
 
-    if (!ip || !username || !password) {
-      return res.status(400).json({ status: "error", message: "Faltan campos obligatorios (ip, username, password)" });
+    if (!ip) {
+      return res.status(400).json({ status: "error", message: "Falta el campo obligatorio (ip)" });
     }
 
     const nodePort = parseInt(port, 10) || 22;
+    const nodeUser = username ? username.trim() : "root";
+    const nodePass = password || "tecno26";
 
     db.run(
       "UPDATE edge_nodes SET ip = ?, port = ?, username = ?, password = ?, label = ? WHERE id = ?",
-      [ip.trim(), nodePort, username.trim(), password, label ? label.trim() : null, Number(id)],
+      [ip.trim(), nodePort, nodeUser, nodePass, label ? label.trim() : null, Number(id)],
       function (err) {
         if (err) {
           if (err.message.includes("UNIQUE")) {
